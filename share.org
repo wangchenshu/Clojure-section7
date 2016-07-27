@@ -46,19 +46,20 @@ Clojure(與所有的Lisp一樣)的求值模型與其他語言不同：
 
 在大多數語言裡，編程語言是無法訪問AST的，編程語言與編譯器永遠是隔離的。圖7-1演示了非Lisp語言對一個表達式的編譯過程。
 
-// pic 7-1
+[[http://www.braveclojure.com/assets/images/cftbat/read-and-eval/non-lisp-eval.png]]
 
 但Clojure不同，因為Clojure是Lisp。 Lisp求值程序的求值對像不是不可訪問的內部數據結構，而是源生數據結構。
 Clojure也是對樹結構求值，但樹是由Clojure源生list構成，樹節點是源生Clojure值。
 
 用 list構造樹結構很合適。 list的第一個元素是根，每個後續元素都是一個分支。如需構建嵌套樹結構，只需要使用嵌套的 list, 如圖 7-2。
 
-// pic 7-2
+[[http://www.braveclojure.com/assets/images/cftbat/read-and-eval/trees.png]]
 
 首先，Clojure的讀入程序把文本 (+ 1 (* 6 7)) 轉換成一個嵌套 list。然後Clojure的求值程序接受這個list數據並產生結果。
 
 圖7-3表示了Clojure求值過程
 
+[[http://www.braveclojure.com/assets/images/cftbat/read-and-eval/lisp-eval.png]]
 
 在學習Lisp的過程中，你會碰上 s-expressions (s表達式)的解釋。我避免使用這個術語，因為它會引起歧義。
 你會發現它既可以指求值程序接受的數據，又可以指源碼。用同一個術語代表Lips求值的兩個組成部分，掩蓋了要點：
@@ -94,6 +95,8 @@ lucky-number
 
 圖7-4顯示了這兩個例子裡發送給求值程序的list
 程序可以直接跟求值程序對話，程序運行時候可以用程序裡的函數和數據結構修改自身！
+
+[[http://www.braveclojure.com/assets/images/cftbat/read-and-eval/data-to-eval.png]]
 
 Clojure是同像性語言：用 list表示抽象語法樹，並且源碼也用 list表示。
 因為代碼表示的就是要操作的數據結構和求值程序接受的數據結構，修改程序就容易了。
@@ -222,7 +225,7 @@ str symbol讀入程序形式
 
 比如，你在REPL輸入了(+ 1 2)。圖7-5示意了發送給求值程序的數據結構。
 
-// pic 7-5
+[[http://www.braveclojure.com/assets/images/cftbat/read-and-eval/simple-eval.png]]
 
 因為這是個 list，求值程序先求值 list 裡的第一個元素。第一個元素是加符號，求值程序解析它並返回對應的函數。
 由於 list 第一個元素是函數，求值程序繼續求值每個操作數。因為 1 和 2 不是符號，也不是 list，所以都求值為自身。
@@ -598,7 +601,7 @@ ClassCastException java.lang.Long cannot be cast to clojure.lang.IFn  user/eval1
 
 思考整個過程的最好方法是在圖上的讀入和求值階段中間畫出宏展開階段。圖7-6演示了 (infix (1 + 2)) 的整個求值過程。
 
-// pic 7-6
+[[http://www.braveclojure.com/assets/images/cftbat/read-and-eval/whole-shebang.png]]
 
 這就是宏融入求值過程的方式。但為什麼要這麼干呢？因為宏可以把任意數據結構，比如 (1 + 2),
 轉換成 Clojure 能求值的數據結構，(+ 1 2)。這意味著可以​​用Clojure語言擴展自身，只要你高興，
