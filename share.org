@@ -1,0 +1,652 @@
+* Clojure Section 7
+
+** 前言
+Clojure提供了一種工具：宏。
+
+宏允許你把任意表達式轉換成合法的Clojure，所以你能夠擴展語言以符合你的需求。
+
+看下這個宏的例子：
+
+#+NAME: example.clj
+#+BEGIN_SRC Clojure
+
+(defmacro backwards
+  [form]
+  (reverse form))
+
+(backwards (" backwards" " am" "I" str))
+; => "I am backwards"
+
+#+END_SRC
+
+雖然表達式(" backwards" " am" "I" str)不是合法的Clojure表達式，
+但使用backwards宏使Clojure能成功對它求值。相當於你用這個宏創造了自己的語法。
+
+
+這章講述寫宏需要用到的基礎概念。解釋了Clojure求值模型的三個方面：
+reader(讀入程序)，evaluator(求值程序)，macro expander(宏展開程序)。
+
+** Clojure求值模型概述
+Clojure(與所有的Lisp一樣)的求值模型與其他語言不同：
+由兩步組成。
+第一步讀入文本源碼，產生Clojure數據結構。
+第二步求值這些數據結構。求值時候會遍歷這些數據結構，並根據不同的類型進行不同的動作，
+比如變量查找，函數調用。
+
+比如源碼(+ 1 2),讀入後產生一個 list 數據結構，第一個元素是 + 這個 symbol (符號)，
+後面跟著 1 和 2。之後這個數據結構傳給 Clojure 求值程序，求值程序找到對應符號+的函數，
+然後用 1 和 2 作為參數，調用這個函數。
+
+源碼，數據結構，求值是這樣關係的語言被稱為 homoiconic 語言(同像性語言)。
+(順便提一下，如果你開著燈，在浴室鏡子前面說三聲 homoiconic ,約翰·麥卡錫會出現，並交給你一對圓括號。)
+同像性語言使你能把代碼看成是可以通過程序操縱的數據，即傳說中的的代碼即數據語言。
+
+編程語言需要編譯器或解釋器把Unicode字符組成的源碼轉換成機器指令，其他語言的源碼等等。這個過程中，
+編譯器構建一個抽象語法樹(AST)代表源程序。你可以把AST看成求值程序的輸入，求值程序遍歷這個樹，產生機器碼或其他輸出。
+
+在大多數語言裡，編程語言是無法訪問AST的，編程語言與編譯器永遠是隔離的。圖7-1演示了非Lisp語言對一個表達式的編譯過程。
+
+// pic 7-1
+
+但Clojure不同，因為Clojure是Lisp。 Lisp求值程序的求值對像不是不可訪問的內部數據結構，而是源生數據結構。
+Clojure也是對樹結構求值，但樹是由Clojure源生list構成，樹節點是源生Clojure值。
+
+用 list構造樹結構很合適。 list的第一個元素是根，每個後續元素都是一個分支。如需構建嵌套樹結構，只需要使用嵌套的 list, 如圖 7-2。
+
+// pic 7-2
+
+首先，Clojure的讀入程序把文本 (+ 1 (* 6 7)) 轉換成一個嵌套 list。然後Clojure的求值程序接受這個list數據並產生結果。
+
+圖7-3表示了Clojure求值過程
+
+
+在學習Lisp的過程中，你會碰上 s-expressions (s表達式)的解釋。我避免使用這個術語，因為它會引起歧義。
+你會發現它既可以指求值程序接受的數據，又可以指源碼。用同一個術語代表Lips求值的兩個組成部分，掩蓋了要點：
+​源碼文本代表源生的數據結構，Lisp 對源生的數據結構求值，這很獨特很棒。這裡有一篇很好的s表達式文章
+
+注意：求值程序不在乎輸入從哪來，輸入不一定來自讀入程序。因此，你可以直接用eval發送數據結構給求值程序。
+
+#+NAME: example2.clj
+#+BEGIN_SRC Clojure
+
+(def addition-list (list + 1 2))
+(eval addition-list)
+; => 3
+
+#+END_SRC
+
+這裡，Clojure求值了一個 list。過程是這樣的：當Clojure求值這個 list時候，找到 addition-list 引用的 list,然後找到符號+對應的函數，
+然後以 1 和 2 為參數調用這個函數，返回3。運行中的程序的數據結構和求值程序使用的數據結構處於同一空間，因此你可以運用所有的Clojure力量構建數據結構用於求值:
+
+#+NAME: example3.clj
+#+BEGIN_SRC Clojure
+
+(eval (concat addition-list [10]))
+; => 13
+
+(eval (list 'def 'lucky-number (concat addition-list [10])))
+; => #'user/lucky-number
+
+lucky-number
+; => 13
+
+#+END_SRC
+
+圖7-4顯示了這兩個例子裡發送給求值程序的list
+程序可以直接跟求值程序對話，程序運行時候可以用程序裡的函數和數據結構修改自身！
+
+Clojure是同像性語言：用 list表示抽象語法樹，並且源碼也用 list表示。
+因為代碼表示的就是要操作的數據結構和求值程序接受的數據結構，修改程序就容易了。
+
+用宏可以輕鬆完成這些數據結構操作。下面講述Clojure的讀入程序和求值規則，使你能準確理解宏是如何工作的。
+
+** 讀入程序 (The Reader)
+讀入程序把存在文件裡的或REPL輸入的源碼轉換成Clojure數據結構。就像一個翻譯，把人類世界的Unicode字符翻譯成Clojure世界的
+list, vector, map, symbol和其他數據結構。接下來我們將要直接與讀入程序交互，並學習一個方便的功能，讀入程序宏，使代碼更簡潔。
+
+*** 讀入 (Reading)
+為了理解讀入，讓我們仔細看看Clojure如何處理REPL裡輸入的文字。首先，REPL提示你輸入文字：
+
+然後你輸入一些文字。也許是這樣：
+
+#+NAME: reading-example1.clj
+#+BEGIN_SRC Clojure
+
+user=> (str "To understand what recursion is," " you must first understand recursion.")
+"To understand what recursion is, you must first understand recursion."
+
+#+END_SRC
+
+這些文字只是一系列 Unicode字符，但代表的是 Clojure數據結構組合。這個表示數據結構的文本形式叫做 reader form(讀入程序形式)。這個例子裡，
+這個形式表示的是一個 list數據結構，這個 list又包含了3個形式：str符號和兩個字符串。
+
+輸入完成並回車之後，這些文本被讀入程序接受(REPL代表了讀入-求值-打印-循環)。 
+Clojure內部用這些文本產生對應的數據結構。然後求值，打印結果的文本表示：
+
+"To understand what recursion is, you must first understand recursion."
+
+讀入和求值是能獨立執行的分離步驟。使用 read-string 函數可以直接與讀入程序交互。
+read-string 接受一個字符串參數，用Clojure的讀入程序處理它，然後返回數據結構:
+
+#+NAME: reading-example2.clj
+#+BEGIN_SRC Clojure
+
+(read-string "(+ 1 2)")
+; => (+ 1 2)
+
+(list? (read-string "(+ 1 2)"))
+; => true
+
+(conj (read-string "(+ 1 2)") :zagglewag)
+; => (:zagglewag + 1 2)
+
+#+END_SRC
+
+第一個例子，read-string 讀入了一個包含加號符號和數字 1，2 的 list字符串，返回實際 list，從第二個例子可以證實。
+第三個例子用 conj 把一個 keyword 附加到這個 list 上。這裡的要點是讀入和求值互相獨立。你可以讀入文本但不求值，
+也可以把讀入結果傳給其他函數。如果願意，你也可以求值結果：
+
+#+NAME: reading-example3.clj
+#+BEGIN_SRC Clojure
+
+(eval (read-string "(+ 1 2)"))
+; => 3
+
+#+END_SRC
+
+到現在的所有例子，都是讀入程序形式與數據結構一一對應。更多的例子：
+
+() list讀入程序形式
+str symbol讀入程序形式
+[1 2] vector讀入程序形式，包含了兩個數字讀入形式
+{:sound “hoot”} map讀入程序形式，包含兩個讀入形式，一個keyword和一個字符串
+
+但是，讀入程序把文本轉換成數據結構時候，可以採用更複雜的行為。還記得匿名函數嗎？
+
+#+NAME: reading-example4.clj
+#+BEGIN_SRC Clojure
+
+(#(+ 1 %) 3)
+; => 4
+
+#+END_SRC
+
+試試這個：
+
+#+NAME: reading-example5.clj
+#+BEGIN_SRC Clojure
+
+(read-string "#(+ 1 %)")
+; => (fn* [p1__423#] (+ 1 p1__423#))
+
+#+END_SRC
+
+擦！這不是一一對應。讀入 #(+ 1 %) 生成了一個 list，包含 fn* 符號，一個 vector(含有一個符號)，
+一個 list(含有3個成員)。發生了什麼？
+
+*** 讀入程序宏 (Reader Macros)
+讀入程序用一個讀入程序宏轉換了 #(+ 1 %) 。讀入程序宏是一組規則，用於把文本轉換成數據結構。
+由於讀入程序宏採用了縮寫的讀入程序形式，並被展開成完整形式，所以可以更簡潔地表示數據結構。
+他們由宏字符標識，比如‘(單引號)，#,@。他們與後面講的宏完全是兩碼事。不要混為一談。引用他們時候，
+我會總是用完整的讀入程序宏。
+
+例如，看看引用讀入程序宏是如何擴展單引號字符的：
+
+#+NAME: reading-example6.clj
+#+BEGIN_SRC Clojure
+
+(read-string "'(a b c)")
+; => (quote (a b c))
+
+#+END_SRC
+
+讀入程序遇到單引號時，會把它展開成一個 list，其第一個成員是符號 quote,第二個成員是單引號後面的數據結構。
+類似地，對於 @ 字符，讀入程序用 defef 讀入程序宏展開:
+
+#+NAME: reading-example6.clj
+#+BEGIN_SRC Clojure
+
+(read-string "@var")
+; => (clojure.core/deref var)
+
+#+END_SRC
+
+讀入程序宏還能忽略文本。分號是單行註釋讀入程序宏：
+這就是讀入程序，把文本轉換成數據結構。現在我們看看Clojure是如何求值這些數據結構的。
+
+*** 求值程序 (The Evaluator)
+
+你可以把 Clojure 的求值程序看成一個接受數據結構的函數，用與數據結構類型對應的規則處理數據結構，
+並返回結果。求值符號時，Clojure 查找符號的引用。求值 list時候，Clojure查看 list的第一個成員，
+並調用一個函數或宏或特殊形式。任何其他值，包括字符串，數字，keyword，求值結果都是他們自身。
+
+比如，你在REPL輸入了(+ 1 2)。圖7-5示意了發送給求值程序的數據結構。
+
+// pic 7-5
+
+因為這是個 list，求值程序先求值 list 裡的第一個元素。第一個元素是加符號，求值程序解析它並返回對應的函數。
+由於 list 第一個元素是函數，求值程序繼續求值每個操作數。因為 1 和 2 不是符號，也不是 list，所以都求值為自身。
+接下來求值程序用1和2作為操作數調用函數，並返回結果。
+
+這節的剩餘部分全面解釋求值程序對每種數據結構的求值規則。
+
+*** 數據 (data)
+這章裡我經常提到Clojure求值數據結構，但這不太精確。技術上講，數據結構是指某種集合，
+但我也用這個詞代表純量(單個的，非集合)值，比如符號，數字。因為我覺得用數據結構比用數據對像或數據更合適。
+
+這些東西求值結果是他們自身
+無論何時，Clojure求值的數據結構如果不是list或符號，結果都是他們自身：
+
+#+NAME: reading-example7.clj
+#+BEGIN_SRC Clojure
+
+true
+; => true
+
+false
+; => false
+
+{}
+; => {}
+
+:huzzah
+; => :huzzah
+
+#+END_SRC
+
+空 list 也求值為自身：
+
+#+NAME: reading-example7.clj
+#+BEGIN_SRC Clojure
+
+()
+; => ()
+
+#+END_SRC
+
+*** 符號 (symbols)
+
+程序員的一個重要任務就是建立名字和值之間的關聯。第3章講述的 def, let,函數定義都是乾這個的。
+Clojure用符號命名函數，宏，數據和任何其他可用的東西，並通過解析來對其求值。要解析一個符號，
+Clojure遍歷所有你建立的綁定，然後在一個命名空間裡查找這個符號條目，第6章講解過這些。
+最終一個符號解析成一個值或一個特殊形式–提供基礎行為的Clojure內建操作符。
+
+通常，Clojure這樣解析一個符號：
+
+1. 查找這個符號是否是特殊形式。如果不是…
+2. 查找是否是本地綁定。如果不是…
+3. 在命名空間裡查找是否是一個def定義的映射。如果不是…
+4. 拋出異常
+
+先看一個解析成特殊形式的符號。特殊形式，比如if,總是作為操作符使用，總是list裡的第一個元素：
+
+#+NAME: symbol-example1.clj
+#+BEGIN_SRC Clojure
+
+(if true :a :b)
+; => :a
+
+#+END_SRC
+
+這個例子裡，if是特殊形式，作為一個操作符使用。如果在其他情況下引用特殊形式，會引起異常:
+
+#+NAME: symbol-example2.clj
+#+BEGIN_SRC Clojure
+
+user=> if
+
+CompilerException java.lang.RuntimeException: Unable to resolve symbol: if in this context, compiling:(/private/var/folders/84/4s5rxsjj34n1hgrg66kx018w0000gn/T/form-init4336725258485417113.clj:1:1062)
+
+#+END_SRC
+
+接下來，求值本地綁定。本地綁定是任何非 def 建立的符號與值的關聯。這個例子裡，
+符號 x 通過 let 與 5 綁定。求值程序解析 x 時候，解析成值 5:
+
+#+NAME: symbol-example3.clj
+#+BEGIN_SRC Clojure
+
+(let [x 5]
+  (+ x 3))
+; => 8
+
+#+END_SRC
+
+如果建立一個 x 與 15 的命名空間映射,Clojure會相應地解析它:
+
+#+NAME: symbol-example4.clj
+#+BEGIN_SRC Clojure
+
+(def x 15)
+  (+ x 3)
+; => 18
+
+#+END_SRC
+
+下個例子裡, x 映射成 15 ,但在本地綁定裡 x 通過 let 綁定為 5 ,所以 x 解析為 5:
+
+#+NAME: symbol-example5.clj
+#+BEGIN_SRC Clojure
+
+(def x 15)
+  (let [x 5]
+    (+ x 3))
+; => 8
+
+#+END_SRC
+
+也可以嵌套綁定,最內部的綁定優先級最高:
+
+#+NAME: symbol-example5.clj
+#+BEGIN_SRC Clojure
+
+(let [x 5]
+  (let [x 6]
+    (+ x 3)))
+; => 9
+
+#+END_SRC
+
+函數也會創建本地綁定,在函數體裡,把參數名與參數值綁定.這個例子裡, exclaim 是函數.
+函數體裡,參數名 exclamation 與傳給函數的參數值綁定:
+
+#+NAME: symbol-example6.clj
+#+BEGIN_SRC Clojure
+
+(defn exclaim
+  [exclamation]
+  (str exclamation "!"))
+
+(exclaim "Hadoken")
+; => "Hadoken!"
+
+#+END_SRC
+
+最後這個例子裡, map 和 inc 都是函數引用:
+
+#+NAME: symbol-example7.clj
+#+BEGIN_SRC Clojure
+
+(map inc [1 2 3])
+; => (2 3 4)
+
+#+END_SRC
+
+Clojure 解析這個代碼時,先求值 map 符號,查找相應的函數並用其參數調用它.
+符號 map 引用的是 map 函數,但不要把它與函數自身混淆。符號map仍然是數據結構,
+就像字符串 "fried salad" 是數據結構一樣,符號不是函數本身:
+
+#+NAME: symbol-example7.clj
+#+BEGIN_SRC Clojure
+
+(read-string ("+"))
+; => +
+
+(type (read-string "+"))
+; => clojure.lang.Symbol
+
+(list (read-string "+") 1 2)
+; => (+ 1 2)
+
+#+END_SRC
+
+在這個例子裡,你直接與作為數據結構的符號+交互.不是與它引用的加法函數交互.如果對它求值,Clojure查找這個函數並調用:
+
+#+NAME: symbol-example7.clj
+#+BEGIN_SRC Clojure
+
+(eval (list (read-string "+") 1 2))
+; => 3
+
+#+END_SRC
+
+對於符號和符號的引用自身來說,他們實際上什麼也不做; Clojure靠求值list幹活.
+
+*** 列表 (Lists)
+如果求值的數據結構是空list, 求值結果是空list:
+
+#+NAME: lists-example1.clj
+#+BEGIN_SRC Clojure
+
+(eval (read-string "()"))
+; => ()
+
+#+END_SRC
+
+否則,就是對列表裡第一個元素的調用的求值.調用的方法由第一個元素的性質決定.
+
+*** 函數調用 (Function Calls)
+進行函數調用時,每個操作數都完全求值,然後作為參數傳遞給函數.這個例子中,符號 + 解析為函數:
+
+#+NAME: function-calls-example1.clj
+#+BEGIN_SRC Clojure
+
+(+ 1 2)
+; => 3
+
+#+END_SRC
+
+Clojure看到 list 的第一個元素是個函數,所以它繼續求值 list 裡剩餘的元素.操作數 1 和 2 都求值為自身,之後用這些參數調用函數.
+
+函數調用也可能嵌套:
+
+#+NAME: function-calls-example2.clj
+#+BEGIN_SRC Clojure
+
+(+ 1 (+ 2 3))
+; => 6
+
+#+END_SRC
+
+儘管第二個參加是個 list ,Clojure仍採用同樣的過程: 
+查找符號 + 並求值其每個參數.求值 list(+ 2 3) 時,
+Clojure把第一個成員解析為加法函數並繼續求值每個參數.求值以這種方式遞歸進行.
+
+*** 特殊形式 (Special Forms)
+特殊形式 也可以調用.總的來說,特殊形式的特殊之處在於: 它們實現了函數無法實現的核心功能.比如:
+
+#+NAME: special-forms-example1.clj
+#+BEGIN_SRC Clojure
+
+(if true 1 2)
+; => 1
+
+#+END_SRC
+
+這裡,Clojure求值了一個以符號 if 開始的 list。這個 if 符號解析為 if 特殊形式,
+Clojure用操作數 true, 1, 2 調用這個特殊形式。
+
+特殊形式不遵從普通函數的求值規則。比如，調用函數時，每個操作數都被求值。
+但對於 if ,不希望每個操作數都被求值。只希望根據條件是否為 true 或 false ,某個操作數被求值。
+
+另一個重要特殊形式是引用(quote)。你已經見過這麼表示的list:
+
+#+NAME: special-forms-example2.clj
+#+BEGIN_SRC Clojure
+
+'(a b c)
+
+#+END_SRC
+
+前面見過，這會調用會使用一個讀入程序宏最終得到這個：
+
+#+NAME: special-forms-example3.clj
+#+BEGIN_SRC Clojure
+
+(quote (a b c))
+
+#+END_SRC
+
+通常，因為符號 a 是 list第一個成員，Clojure會嘗試解析並調用它。
+引用特殊形式的用處是告訴求值程序，不要求值下一個數據結構，直接返回這個數據結構自身。
+這個例子裡，就是個符號 a, b, c 組成的 list。
+
+def, let, loop, fn, do 和 recur都是特殊形式。原因是他們與函數的求值方法不同。
+例如，一般情況下，求值程序求值一個符號時，會解析那個符號，但def和let明顯不是這樣，
+而是創建了符號與值的關聯。就是這樣：
+求值程序從讀入程序接受數據結構，並解析其中的符號，並調用每個 list的第一個函數或特殊形式。
+但還沒完！ list第一個成員除了是函數或特殊形式，還可以是宏，
+宏賦予你極其強大的對於其後的數據結構如何求值的能力。
+
+*** 宏 (Macros)
+Clojure求值的數據結構和我們寫的數據結構是一樣的。如果能夠修改Clojure求值的數據結構，
+是不是很棒呢？宏就是乾這個的！宏可以操縱Clojure求值的數據結構!
+
+為了感受一下宏使乾啥的，來看個例子。比如說需要一個函數，使我們能讀取中置表示法(比如1 + 1),
+而不是正常的前置表示法(+ 1 1)。這個例子不是宏，只是讓你知道，你可以寫中置表示法的代碼，
+然後轉換成可以執行的代碼。首先建立一個中置加法 list：
+
+#+NAME: macro-example1.clj
+#+BEGIN_SRC Clojure
+
+(read-string "(1 + 1)")
+; => (1 + 1)
+
+#+END_SRC
+
+如果你對這個 list求值，會拋出異常：
+
+#+NAME: macro-example2.clj
+#+BEGIN_SRC Clojure
+
+user=> (eval (read-string "(1 + 1)"))
+
+ClassCastException java.lang.Long cannot be cast to clojure.lang.IFn  user/eval1248 (form-init4336725258485417113.clj:1)
+
+#+END_SRC
+
+但 read-string 返回的是 list,你可以重組這個 list，使它能夠成功求值：
+
+#+NAME: macro-example2.clj
+#+BEGIN_SRC Clojure
+
+(let [infix (read-string "(1 + 1)")]
+  (list (second infix) (first infix) (last infix)))
+; => (+ 1 1)
+
+#+END_SRC
+
+如果求值，會返回2，如你所願：
+
+#+NAME: macro-example3.clj
+#+BEGIN_SRC Clojure
+
+(eval
+ (let [infix (read-string "(1 + 1)")]
+   (list (second infix) (first infix) (last infix))))
+; => 2
+
+#+END_SRC
+
+這很酷，但很麻煩。宏就是為了解決這個問題。Clojure 求值 list 之前，用宏可以方便地操縱它。
+宏很像函數：接受參數，返回值。宏像函數一樣，也對數據結構起作用。宏的獨特和強大之處在於它如何融入求值過程。
+宏執行於讀入程序和求值程序之間–所以宏能操縱並轉換讀入程序生成的數據結構，然後再傳給求值程序。
+
+看個例子：
+
+#+NAME: macro-example4.clj
+#+BEGIN_SRC Clojure
+
+(defmacro ignore-last-operand
+  [function-call]
+  (butlast function-call))
+
+➊(ignore-last-operand (+ 1 2 10))
+; => 3
+
+;; This will not print anything
+(ignore-last-operand (+ 1 2 (println "look at me!!!")))
+; => 3
+
+#+END_SRC
+
+在 ➊ 處，宏 ignore-last-operand 接受了的參數是 list(+ 1 2 10)，而不是13。
+這與函數很不同，因為函數總是求值所有傳入的參數，所以函數無法忽略或修改某個參數。
+與之相反，宏不對參數求值。特別是宏不對符號求值，符號傳給宏還是符號。宏也不對 list 求值，
+即 list 的第一個成員不會作為函數，特殊形式或宏被調用，傳給宏的還是未求值的 list 數據結構。
+
+另一個差別是函數返回的數據結構不被求值，宏返回的被求值。宏返回數據結構的過程叫宏展開，
+並且在這個數據結構被求值之前，可以用函數 macroexpand 看返回結果。注意，傳給 macroexpand 的形式必須用 quote 包住：
+
+#+NAME: macro-example5.clj
+#+BEGIN_SRC Clojure
+
+(macroexpand '(ignore-last-operand (+ 1 2 10)))
+; => (+ 1 2)
+
+(macroexpand '(ignore-last-operand (+ 1 2 (println "look at me!!!"))))
+; => (+ 1 2)
+
+#+END_SRC
+
+可以看到，兩個展開結果都是 list(+ 1 2)。當這個list被求值時候，結果是3。
+
+只是為了好玩，這個宏實現簡單的中置表示法：
+
+#+NAME: macro-example6.clj
+#+BEGIN_SRC Clojure
+
+(defmacro infix
+  [infixed]
+  (list (second infixed) 
+        (first infixed) 
+        (last infixed)))
+
+(infix (1 + 2))
+; => 3
+
+#+END_SRC
+
+思考整個過程的最好方法是在圖上的讀入和求值階段中間畫出宏展開階段。圖7-6演示了 (infix (1 + 2)) 的整個求值過程。
+
+// pic 7-6
+
+這就是宏融入求值過程的方式。但為什麼要這麼干呢？因為宏可以把任意數據結構，比如 (1 + 2),
+轉換成 Clojure 能求值的數據結構，(+ 1 2)。這意味著可以​​用Clojure語言擴展自身，只要你高興，
+程序愛怎麼寫怎麼寫。換句話說，Clojure允許你進行語法抽象。語法抽象聽起來有點抽象，讓我們探索一下。
+
+*** 語法抽象與 -> 宏 (Syntactic Abstraction and the -> Macro)
+
+Clojure代碼經常由大量嵌套函數調用構成。比如下面是一個用在我項目裡的函數：
+
+#+NAME: macro-example7.clj
+#+BEGIN_SRC Clojure
+
+(defn read-resource
+  "Read a resource into a string"
+  [path]
+  (read-string (slurp (clojure.java.io/resource path))))
+
+#+END_SRC
+
+要理解函數體，你必須找到最裡面的形式，這裡是 (clojure.java.io/resource path), 然後從右至左地往外層走，
+查看每個函數調用的結果是如何傳給下一個函數的。這種從右往左的過程與非Lisp程序員習慣的過程相反。如果你習慣了Clojure，
+這樣的代碼就會越來越容易理解。但如果你想轉換 Clojure 代碼，讓你用更習慣的，從左到右，從上到下的方式閱讀，
+你可以用內建的->宏做到，這個宏也叫穿線或穿串宏。前面的函數可以這麼寫：
+
+#+NAME: macro-example8.clj
+#+BEGIN_SRC Clojure
+
+(defn read-resource
+  [path]
+  (-> path
+      clojure.java.io/resource
+      slurp
+      read-string))
+
+#+END_SRC
+
+可以看到，這是一個從上到下的管道，而不是從內到外的括號。首先，path 被傳給 io/resource,
+然後結果被傳給 slurp,最後又被傳給 read-string。
+
+用這兩種方法定義read-resource完全一樣。但第二種可能更容易理解，因為可以用習慣的從上到下的方向。
+-> 還省去了括號，視覺上更清晰。這是個語法抽象，因為它使我們能夠用與Clojure內置語法不同，但人類更喜歡的方式寫代碼。
+
+*** 總結 (Summary)
+這章講述了 Clojure 的求值過程。首先，讀入程序把文本轉換成 Clojure 數據結構。
+然後，宏展開程序用宏轉換這些數據結構，把自定義語法轉換成語法合法的數據結構。
+最後，這些數據結構被傳給求值程序。求值程序基於數據結構的類型處理數據結構：
+符號被解析成符號的引用；list 的解析結果是函數、宏或特殊形式的調用；所有其他類型都解析為自身。
+
+最酷的是這個過程允許你用 Clojure 擴展自己的語法。
+因為 Clojure 是同像性語言，這個過程更容易了：
+代碼代表數據結構，數據結構代表抽象語法樹，使你推斷如何構建語法擴展宏變得更加容易。
